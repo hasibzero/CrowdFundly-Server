@@ -76,6 +76,93 @@ async function run() {
       res.send('Crowdfundly Server is running!');
     });
 
+    const bcrypt = require('bcryptjs');
+
+    // ==========================================
+    // Authentication Routes
+    // ==========================================
+    app.post('/api/auth/register', async (req, res) => {
+      const { name, email, password, role, photoURL } = req.body;
+      
+      const query = { email: email };
+      const existingUser = await usersCollection.findOne(query);
+      if (existingUser) {
+        return res.status(400).send({ message: 'User already exists' });
+      }
+
+      const hashedPassword = await bcrypt.hash(password, 10);
+      const credits = role === 'Supporter' ? 50 : 20;
+
+      const newUser = {
+        name,
+        email,
+        password: hashedPassword,
+        role,
+        photoURL: photoURL || '',
+        credits,
+        createdAt: new Date(),
+      };
+
+      const result = await usersCollection.insertOne(newUser);
+      
+      // Generate Token
+      const secret = new TextEncoder().encode(process.env.ACCESS_TOKEN_SECRET);
+      const token = await new SignJWT({ email: newUser.email, role: newUser.role })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .setExpirationTime('7d')
+        .sign(secret);
+
+      res.send({ 
+        token, 
+        user: { 
+          _id: result.insertedId,
+          name: newUser.name, 
+          email: newUser.email, 
+          role: newUser.role, 
+          credits: newUser.credits,
+          photoURL: newUser.photoURL
+        } 
+      });
+    });
+
+    app.post('/api/auth/login', async (req, res) => {
+      const { email, password } = req.body;
+      
+      const user = await usersCollection.findOne({ email: email });
+      if (!user) {
+        return res.status(401).send({ message: 'Invalid credentials' });
+      }
+
+      const isMatch = await bcrypt.compare(password, user.password);
+      if (!isMatch) {
+        return res.status(401).send({ message: 'Invalid credentials' });
+      }
+
+      const secret = new TextEncoder().encode(process.env.ACCESS_TOKEN_SECRET);
+      const token = await new SignJWT({ email: user.email, role: user.role })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .setExpirationTime('7d')
+        .sign(secret);
+
+      res.send({ 
+        token, 
+        user: { 
+          _id: user._id,
+          name: user.name, 
+          email: user.email, 
+          role: user.role, 
+          credits: user.credits,
+          photoURL: user.photoURL
+        } 
+      });
+    });
+
+    app.get('/', (req, res) => {
+      res.send('Crowdfundly Server is running!');
+    });
+
     // Send a ping to confirm a successful connection
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
