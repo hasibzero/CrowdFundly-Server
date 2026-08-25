@@ -707,11 +707,15 @@ async function run() {
           return res.status(400).send({ message: 'Insufficient credits for withdrawal' });
         }
 
-        // Deduct credits immediately (escrow)
-        await usersCollection.updateOne(
-          { email: userEmail },
+        // Deduct credits immediately (escrow) atomically preventing negative balance
+        const debit = await usersCollection.updateOne(
+          { email: userEmail, credits: { $gte: parsedCredits } },
           { $inc: { credits: -parsedCredits } }
         );
+
+        if (!debit.matchedCount) {
+          return res.status(400).send({ message: 'Insufficient credits for withdrawal' });
+        }
 
         const newWithdrawal = {
           creatorEmail: userEmail,
