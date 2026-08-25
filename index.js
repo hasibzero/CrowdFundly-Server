@@ -11,7 +11,7 @@ const port = process.env.PORT || 5000;
 
 // Middleware
 const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
-const creditsPerUsd = 20;
+const creditsPerUsd = 1;
 const minimumWithdrawalCredits = 100;
 
 app.use(cors({ origin: clientUrl }));
@@ -296,6 +296,47 @@ async function run() {
       }
     });
 
+    // Update campaign (Edit)
+    app.put('/api/campaigns/:id', verifyToken, async (req, res) => {
+      try {
+        const id = req.params.id;
+        const updateData = req.body;
+        const filter = { _id: new ObjectId(id) };
+        const campaign = await campaignsCollection.findOne(filter);
+        
+        if (!campaign) {
+          return res.status(404).send({ message: 'Campaign not found' });
+        }
+        
+        if (campaign.creatorEmail !== req.decoded.email) {
+          return res.status(403).send({ message: 'Unauthorized: Only the creator can edit this campaign.' });
+        }
+
+        // Always revert status to Pending upon edit
+        const updateDoc = {
+          $set: {
+            title: updateData.title || campaign.title,
+            category: updateData.category || campaign.category,
+            subCategory: updateData.subCategory || campaign.subCategory,
+            location: updateData.location || campaign.location,
+            shortDescription: updateData.shortDescription || campaign.shortDescription,
+            story: updateData.story || campaign.story,
+            targetAmount: Number(updateData.targetAmount) || campaign.targetAmount,
+            duration: Number(updateData.duration) || campaign.duration,
+            coverImage: updateData.coverImage || campaign.coverImage,
+            teamName: updateData.teamName || campaign.teamName,
+            teamRole: updateData.teamRole || campaign.teamRole,
+            status: 'Pending',
+            updatedAt: new Date()
+          },
+        };
+        const result = await campaignsCollection.updateOne(filter, updateDoc);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to update campaign', error: error.message });
+      }
+    });
+
     // Update campaign status (Admin approval)
     app.patch('/api/campaigns/:id/status', verifyToken, async (req, res) => {
       try {
@@ -360,7 +401,7 @@ async function run() {
 
             // Notify supporter
             await notificationsCollection.insertOne({
-              message: `The campaign "${campaign.title}" was deleted. You have been refunded ${contrib.amount} credits.`,
+              message: `The campaign "${campaign.title}" was deleted. You have been refunded $${contrib.amount} USD.`,
               toEmail: contrib.supporterEmail,
               actionRoute: '/dashboard/contributions',
               time: new Date(),
@@ -459,7 +500,7 @@ async function run() {
           mode: 'payment',
           client_reference_id: user._id.toString(),
           metadata: { userId: user._id.toString(), credits: String(credits) },
-          line_items: [{ price_data: { currency: 'usd', product_data: { name: `${credits.toLocaleString()} Crowdfundly credits` }, unit_amount: Math.round((credits / creditsPerUsd) * 100) }, quantity: 1 }],
+          line_items: [{ price_data: { currency: 'usd', product_data: { name: `$${credits.toLocaleString()} Deposit` }, unit_amount: Math.round((credits / creditsPerUsd) * 100) }, quantity: 1 }],
           success_url: `${clientUrl}/dashboard/credits?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${clientUrl}/dashboard/credits?checkout=cancelled`,
         });
@@ -520,13 +561,13 @@ async function run() {
         const { campaignId, amount } = req.body;
         const parsedAmount = Number(amount);
         const userEmail = req.decoded.email;
-        if (!ObjectId.isValid(campaignId) || !Number.isInteger(parsedAmount) || parsedAmount < 1) return res.status(400).send({ message: 'Enter a whole-number contribution of at least 1 credit' });
+        if (!ObjectId.isValid(campaignId) || !Number.isInteger(parsedAmount) || parsedAmount < 1) return res.status(400).send({ message: 'Enter a whole-number contribution of at least 1 USD' });
         const campaign = await campaignsCollection.findOne({ _id: new ObjectId(campaignId), status: 'Approved' });
         if (!campaign) return res.status(404).send({ message: 'Campaign is unavailable' });
         const deadline = new Date(new Date(campaign.createdAt).getTime() + campaign.duration * 86400000);
         if (deadline <= new Date()) return res.status(400).send({ message: 'This campaign has ended' });
         const debit = await usersCollection.updateOne({ email: userEmail, credits: { $gte: parsedAmount } }, { $inc: { credits: -parsedAmount } });
-        if (!debit.matchedCount) return res.status(400).send({ message: 'Insufficient credits' });
+        if (!debit.matchedCount) return res.status(400).send({ message: 'Insufficient USD balance' });
         // DO NOT add to campaign or creator yet (escrowed)
         // Record contribution
         const newContribution = {
@@ -546,7 +587,7 @@ async function run() {
         
         // Notify Creator
         await notificationsCollection.insertOne({
-          message: `You received a new pending contribution of ${parsedAmount} credits for "${campaign.title}"`,
+          message: `You received a new pending contribution of $${(parsedAmount / 10).toFixed(2)} USD for "${campaign.title}"`,
           toEmail: campaign.creatorEmail,
           actionRoute: '/dashboard/review-contributions',
           time: new Date(),
@@ -601,7 +642,7 @@ async function run() {
 
         // Notify Supporter
         await notificationsCollection.insertOne({
-          message: `Your contribution of ${contribution.amount} credits to "${contribution.campaignTitle}" was ${status === 'Completed' ? 'approved' : 'rejected'} by the creator.`,
+          message: `Your contribution of $${contribution.amount} USD to "${contribution.campaignTitle}" was ${status === 'Completed' ? 'approved' : 'rejected'} by the creator.`,
           toEmail: contribution.supporterEmail,
           actionRoute: '/dashboard/contributions',
           time: new Date(),
@@ -730,7 +771,7 @@ async function run() {
         
         // Notify Creator
         await notificationsCollection.insertOne({
-          message: `Your withdrawal request for ${withdrawal.credits} credits was ${status.toLowerCase()} by Admin`,
+          message: `Your withdrawal request for $${(withdrawal.credits / creditsPerUsd).toFixed(2)} USD was ${status.toLowerCase()} by Admin`,
           toEmail: withdrawal.creatorEmail,
           actionRoute: '/dashboard/history',
           time: new Date(),
@@ -765,6 +806,21 @@ async function run() {
         res.send(campaigns);
       } catch (error) {
         res.status(500).send({ message: 'Failed to fetch campaigns' });
+      }
+    });
+
+    app.get('/api/creator/campaigns/:id', verifyToken, async (req, res) => {
+      try {
+        if (req.decoded.role !== 'Creator') return res.status(403).send({ message: 'Creator access required' });
+        const id = req.params.id;
+        const filter = { _id: new ObjectId(id), creatorEmail: req.decoded.email };
+        const campaign = await campaignsCollection.findOne(filter);
+        if (!campaign) {
+          return res.status(404).send({ message: 'Campaign not found' });
+        }
+        res.send(campaign);
+      } catch (error) {
+        res.status(500).send({ message: 'Failed to fetch campaign' });
       }
     });
 
