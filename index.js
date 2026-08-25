@@ -539,6 +539,7 @@ async function run() {
           return res.send({ credits: currentUser?.credits || 0, granted: 0, alreadyProcessed: true });
         }
       } catch (error) {
+        console.error('Confirm checkout error:', error);
         res.status(500).send({ message: 'Unable to confirm credit purchase' });
       }
     });
