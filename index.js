@@ -490,10 +490,8 @@ async function run() {
         const user = await usersCollection.findOne({ email: req.decoded.email }, { projection: { _id: 1 } });
         if (!user) return res.status(404).send({ message: 'User not found' });
         
-        if (!stripe || process.env.STRIPE_SECRET_KEY === 'your_stripe_secret_key_here') {
-          // Dummy fallback
-          const sessionId = 'dummy_session_' + Date.now();
-          return res.send({ url: `${clientUrl}/dashboard/credits?checkout=success&session_id=${sessionId}&dummy=true&credits=${credits}` });
+        if (!stripe || !process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY === 'your_stripe_secret_key_here') {
+          return res.status(503).send({ message: 'Stripe payments are not configured on this server.' });
         }
 
         const session = await stripe.checkout.sessions.create({
@@ -520,15 +518,15 @@ async function run() {
         
         let credits = 0;
         
-        if (req.body.isDummy && sessionId.startsWith('dummy_session_')) {
-          credits = Number(req.body.credits);
-        } else {
-          if (!stripe) return res.status(503).send({ message: 'Credit purchases are not configured yet' });
-          const session = await stripe.checkout.sessions.retrieve(sessionId);
-          credits = Number(session.metadata?.credits);
-          if (session.payment_status !== 'paid' || session.client_reference_id !== user._id.toString() || !Number.isInteger(credits)) {
-            return res.status(400).send({ message: 'Payment could not be verified' });
-          }
+        if (!stripe || !process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY === 'your_stripe_secret_key_here') {
+          return res.status(503).send({ message: 'Stripe payments are not configured on this server.' });
+        }
+        
+        const session = await stripe.checkout.sessions.retrieve(sessionId);
+        credits = Number(session.metadata?.credits);
+        
+        if (session.payment_status !== 'paid' || session.client_reference_id !== user._id.toString() || !Number.isInteger(credits)) {
+          return res.status(400).send({ message: 'Payment could not be verified' });
         }
 
         try {
