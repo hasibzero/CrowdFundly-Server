@@ -31,11 +31,10 @@ app.use(express.json());
 
 const uri = process.env.MONGODB_URI;
 
-// Create a MongoClient with a MongoClientOptions object to set the Stable API version
+// Create a MongoClient with a MongoClientOptions object
 const client = new MongoClient(uri, {
   serverApi: {
     version: ServerApiVersion.v1,
-    strict: true,
     deprecationErrors: true,
   }
 });
@@ -50,22 +49,36 @@ const reportsCollection = db.collection('reports');
 const creditPurchasesCollection = db.collection('creditPurchases');
 const notificationsCollection = db.collection('notifications');
 
-// Connect and create indexes asynchronously
-async function connectDB() {
-  try {
-    await client.connect();
-    await Promise.all([
-      usersCollection.createIndex({ email: 1 }, { unique: true }),
-      creditPurchasesCollection.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true }),
-      contributionsCollection.createIndex({ campaignId: 1, supporterEmail: 1 }),
-    ]);
-    await client.db("admin").command({ ping: 1 });
-    console.log("Successfully connected to MongoDB and created indexes!");
-  } catch (error) {
-    console.error("MongoDB connection error:", error);
+// Connection promise cache for serverless environments
+let clientPromise = null;
+async function ensureDbConnected() {
+  if (!clientPromise) {
+    clientPromise = client.connect().then(async (c) => {
+      try {
+        await Promise.all([
+          usersCollection.createIndex({ email: 1 }, { unique: true }),
+          creditPurchasesCollection.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true }),
+          contributionsCollection.createIndex({ campaignId: 1, supporterEmail: 1 }),
+        ]);
+      } catch (e) {
+        console.error("Index creation warning:", e);
+      }
+      return c;
+    });
   }
+  return clientPromise;
 }
-connectDB();
+
+// Middleware to guarantee DB connection before handling any API request
+app.use(async (req, res, next) => {
+  try {
+    await ensureDbConnected();
+    next();
+  } catch (error) {
+    console.error("MongoDB Connection Middleware Failure:", error);
+    res.status(500).send({ message: "Database connection failed", error: error.message });
+  }
+});
 
     // ==========================================
     // Middleware: Verify Token
@@ -131,6 +144,28 @@ connectDB();
         const secret = new TextEncoder().encode(process.env.ACCESS_TOKEN_SECRET || 'fallback_secret_must_match_backend');
         const { payload } = await jwtVerify(token, secret);
         req.decoded = payload;
+
+        if (payload.email) {
+          try {
+            await usersCollection.updateOne(
+              { email: payload.email },
+              {
+                $setOnInsert: {
+                  name: payload.email.split('@')[0],
+                  email: payload.email,
+                  photoURL: '',
+                  role: payload.role || 'Supporter',
+                  credits: 0,
+                  createdAt: new Date()
+                }
+              },
+              { upsert: true }
+            );
+          } catch (syncErr) {
+            // ignore duplicate or index error
+          }
+        }
+
         next();
       } catch (err) {
         return res.status(401).send({ message: 'unauthorized access' });
