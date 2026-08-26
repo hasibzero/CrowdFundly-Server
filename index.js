@@ -1101,12 +1101,18 @@ async function run() {
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
-    app.listen(port, () => {
-      console.log(`Server is running on port ${port}`);
-    });
+    // Start listening if not in Vercel serverless environment
+    if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+      app.listen(port, () => {
+        console.log(`Server is running on port ${port}`);
+      });
+    }
   } finally {
     // Ensures that the client will close when you finish/error
     // await client.close();
   }
 }
 run().catch(console.dir);
+
+// Export for Vercel Serverless
+module.exports = app;
