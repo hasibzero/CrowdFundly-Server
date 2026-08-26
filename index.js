@@ -6,15 +6,26 @@ const { SignJWT, jwtVerify } = require('jose-cjs');
 
 const stripe = process.env.STRIPE_SECRET_KEY ? require('stripe')(process.env.STRIPE_SECRET_KEY) : null;
 
+
 const app = express();
 const port = process.env.PORT || 5000;
 
 // Middleware
 const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
-const creditsPerUsd = 1;
+// Credit economy (per assessment spec):
+//   Purchase:   $1 => 10 credits    (supporters buy credits)
+//   Withdrawal: 20 credits => $1     (creators cash out earned credits)
+const creditsPerUsdPurchase = 10;
+const creditsPerUsdWithdraw = 20;
+// No signup bonus — every new account starts with 0 credits and must
+// purchase (supporters) or earn (creators) them.
+const signupBonus = { Supporter: 0, Creator: 0, Admin: 0 };
 const minimumWithdrawalCredits = 100;
 
-app.use(cors({ origin: clientUrl }));
+app.use(cors({ 
+  origin: clientUrl,
+  credentials: true 
+}));
 app.use(express.json());
 
 const uri = process.env.MONGODB_URI;
@@ -43,6 +54,7 @@ async function run() {
     const creditPurchasesCollection = db.collection('creditPurchases');
     const notificationsCollection = db.collection('notifications');
 
+
     await Promise.all([
       usersCollection.createIndex({ email: 1 }, { unique: true }),
       creditPurchasesCollection.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true }),
@@ -53,9 +65,55 @@ async function run() {
     // Middleware: Verify Token
     // ==========================================
     const verifyToken = async (req, res, next) => {
+
+      // 1. Try Better Auth cookie via Next.js endpoint
+      if (req.headers.cookie && req.headers.cookie.includes('crowdfundly.session_token')) {
+        try {
+          // Use global fetch (Node 18+)
+          const response = await fetch(`${clientUrl}/api/auth/get-session`, {
+            headers: { cookie: req.headers.cookie }
+          });
+          if (response.ok) {
+            const sessionData = await response.json();
+            if (sessionData && sessionData.user) {
+              // Better-auth (e.g. Google) users live in better-auth's own `user`
+              // collection. Mirror them into our app `users` collection so the
+              // JWT-style endpoints (profile, credits, contributions, withdrawals,
+              // stats) can find them by email. New mirrors start at 0 credits (no bonus).
+              try {
+                await usersCollection.updateOne(
+                  { email: sessionData.user.email },
+                  {
+                    $setOnInsert: { credits: 0, createdAt: new Date() },
+                    $set: {
+                      name: sessionData.user.name || sessionData.user.email,
+                      photoURL: sessionData.user.image || '',
+                      role: sessionData.user.role || 'Supporter',
+                    },
+                  },
+                  { upsert: true }
+                );
+              } catch (syncErr) {
+                console.error('Failed to mirror better-auth user into users collection:', syncErr);
+              }
+              req.decoded = {
+                email: sessionData.user.email,
+                role: sessionData.user.role || 'Supporter',
+                _id: sessionData.user.id
+              };
+              return next();
+            }
+          }
+        } catch (e) {
+          console.error("Better Auth token verification error:", e);
+        }
+      }
+
+      // 2. Fallback to Legacy JWT
       if (!req.headers.authorization) {
         return res.status(401).send({ message: 'unauthorized access' });
       }
+      
       const token = req.headers.authorization.split(' ')[1];
       try {
         const secret = new TextEncoder().encode(process.env.ACCESS_TOKEN_SECRET);
@@ -102,7 +160,7 @@ async function run() {
         password: hashedPassword,
         role,
         photoURL: photoURL || '',
-        credits: role === 'Supporter' ? 50 : role === 'Creator' ? 20 : 0,
+        credits: signupBonus[role] || 0,
         createdAt: new Date(),
       };
 
@@ -127,6 +185,63 @@ async function run() {
           photoURL: newUser.photoURL
         } 
       });
+    });
+
+    app.post('/api/auth/google', async (req, res) => {
+      const { access_token, role } = req.body;
+      if (!access_token) return res.status(400).send({ message: 'No token provided' });
+      
+      try {
+        const response = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+          headers: { Authorization: `Bearer ${access_token}` }
+        });
+        const userInfo = await response.json();
+        
+        if (!userInfo.email) {
+          return res.status(400).send({ message: 'Invalid Google token' });
+        }
+        
+        const normalizedEmail = userInfo.email.toLowerCase();
+        let user = await usersCollection.findOne({ email: normalizedEmail });
+        
+        if (!user) {
+          // Register user
+          const adminEmails = (process.env.ADMIN_EMAILS || '').split(',').map((v) => v.trim().toLowerCase()).filter(Boolean);
+          const assignedRole = adminEmails.includes(normalizedEmail) ? 'Admin' : (role === 'Creator' ? 'Creator' : 'Supporter');
+          
+          user = {
+            name: userInfo.name,
+            email: normalizedEmail,
+            photoURL: userInfo.picture || '',
+            role: assignedRole,
+            credits: signupBonus[assignedRole] || 0,
+            createdAt: new Date(),
+          };
+          const result = await usersCollection.insertOne(user);
+          user._id = result.insertedId;
+        }
+        
+        const secret = new TextEncoder().encode(process.env.ACCESS_TOKEN_SECRET);
+        const token = await new SignJWT({ email: user.email, role: user.role })
+          .setProtectedHeader({ alg: 'HS256' })
+          .setIssuedAt()
+          .setExpirationTime('7d')
+          .sign(secret);
+          
+        res.send({
+          token,
+          user: {
+            _id: user._id,
+            name: user.name,
+            email: user.email,
+            role: user.role,
+            credits: user.credits,
+            photoURL: user.photoURL
+          }
+        });
+      } catch (err) {
+        res.status(500).send({ message: 'Google authentication failed' });
+      }
     });
 
     app.post('/api/auth/login', async (req, res) => {
@@ -401,7 +516,7 @@ async function run() {
 
             // Notify supporter
             await notificationsCollection.insertOne({
-              message: `The campaign "${campaign.title}" was deleted. You have been refunded $${contrib.amount} USD.`,
+              message: `The campaign "${campaign.title}" was deleted. You have been refunded ${contrib.amount} credits.`,
               toEmail: contrib.supporterEmail,
               actionRoute: '/dashboard/contributions',
               time: new Date(),
@@ -498,7 +613,7 @@ async function run() {
           mode: 'payment',
           client_reference_id: user._id.toString(),
           metadata: { userId: user._id.toString(), credits: String(credits) },
-          line_items: [{ price_data: { currency: 'usd', product_data: { name: `$${credits.toLocaleString()} Deposit` }, unit_amount: Math.round((credits / creditsPerUsd) * 100) }, quantity: 1 }],
+          line_items: [{ price_data: { currency: 'usd', product_data: { name: `${credits.toLocaleString()} Credits` }, unit_amount: Math.round((credits / creditsPerUsdPurchase) * 100) }, quantity: 1 }],
           success_url: `${clientUrl}/dashboard/credits?checkout=success&session_id={CHECKOUT_SESSION_ID}`,
           cancel_url: `${clientUrl}/dashboard/credits?checkout=cancelled`,
         });
@@ -530,7 +645,7 @@ async function run() {
         }
 
         try {
-          await creditPurchasesCollection.insertOne({ stripeSessionId: sessionId, userEmail: req.decoded.email, credits, amountUSD: credits / creditsPerUsd, createdAt: new Date() });
+          await creditPurchasesCollection.insertOne({ stripeSessionId: sessionId, userEmail: req.decoded.email, credits, amountUSD: credits / creditsPerUsdPurchase, createdAt: new Date() });
           await usersCollection.updateOne({ _id: user._id }, { $inc: { credits } });
           return res.send({ credits: (user.credits || 0) + credits, granted: credits });
         } catch (error) {
@@ -560,13 +675,13 @@ async function run() {
         const { campaignId, amount } = req.body;
         const parsedAmount = Number(amount);
         const userEmail = req.decoded.email;
-        if (!ObjectId.isValid(campaignId) || !Number.isInteger(parsedAmount) || parsedAmount < 1) return res.status(400).send({ message: 'Enter a whole-number contribution of at least 1 USD' });
+        if (!ObjectId.isValid(campaignId) || !Number.isInteger(parsedAmount) || parsedAmount < 1) return res.status(400).send({ message: 'Enter a whole-number contribution of at least 1 credit' });
         const campaign = await campaignsCollection.findOne({ _id: new ObjectId(campaignId), status: 'Approved' });
         if (!campaign) return res.status(404).send({ message: 'Campaign is unavailable' });
         const deadline = new Date(new Date(campaign.createdAt).getTime() + campaign.duration * 86400000);
         if (deadline <= new Date()) return res.status(400).send({ message: 'This campaign has ended' });
         const debit = await usersCollection.updateOne({ email: userEmail, credits: { $gte: parsedAmount } }, { $inc: { credits: -parsedAmount } });
-        if (!debit.matchedCount) return res.status(400).send({ message: 'Insufficient USD balance' });
+        if (!debit.matchedCount) return res.status(400).send({ message: 'Insufficient credit balance' });
         // DO NOT add to campaign or creator yet (escrowed)
         // Record contribution
         const newContribution = {
@@ -576,7 +691,7 @@ async function run() {
           creatorName: campaign.creatorName,
           supporterEmail: userEmail,
           amount: parsedAmount,
-          amountUSD: parsedAmount / creditsPerUsd,
+          amountUSD: parsedAmount / creditsPerUsdPurchase,
           paymentMethod: 'Credits',
           date: new Date(),
           status: 'Pending',
@@ -586,7 +701,7 @@ async function run() {
         
         // Notify Creator
         await notificationsCollection.insertOne({
-          message: `You received a new pending contribution of $${(parsedAmount / 10).toFixed(2)} USD for "${campaign.title}"`,
+          message: `You received a new pending contribution of ${parsedAmount} credits for "${campaign.title}"`,
           toEmail: campaign.creatorEmail,
           actionRoute: '/dashboard/review-contributions',
           time: new Date(),
@@ -641,7 +756,7 @@ async function run() {
 
         // Notify Supporter
         await notificationsCollection.insertOne({
-          message: `Your contribution of $${contribution.amount} USD to "${contribution.campaignTitle}" was ${status === 'Completed' ? 'approved' : 'rejected'} by the creator.`,
+          message: `Your contribution of ${contribution.amount} credits to "${contribution.campaignTitle}" was ${status === 'Completed' ? 'approved' : 'rejected'} by the creator.`,
           toEmail: contribution.supporterEmail,
           actionRoute: '/dashboard/contributions',
           time: new Date(),
@@ -720,7 +835,7 @@ async function run() {
         const newWithdrawal = {
           creatorEmail: userEmail,
           credits: parsedCredits,
-          amountUSD: parsedCredits / creditsPerUsd,
+          amountUSD: parsedCredits / creditsPerUsdWithdraw,
           paymentMethod,
           paymentDetails,
           status: 'Pending',
@@ -774,7 +889,7 @@ async function run() {
         
         // Notify Creator
         await notificationsCollection.insertOne({
-          message: `Your withdrawal request for $${(withdrawal.credits / creditsPerUsd).toFixed(2)} USD was ${status.toLowerCase()} by Admin`,
+          message: `Your withdrawal request for $${(withdrawal.credits / creditsPerUsdWithdraw).toFixed(2)} USD was ${status.toLowerCase()} by Admin`,
           toEmail: withdrawal.creatorEmail,
           actionRoute: '/dashboard/history',
           time: new Date(),
