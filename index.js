@@ -39,27 +39,31 @@ const client = new MongoClient(uri, {
   }
 });
 
-async function run() {
+// Database and Collections
+const db = client.db('crowdfundly');
+const usersCollection = db.collection('users');
+const campaignsCollection = db.collection('campaigns');
+const contributionsCollection = db.collection('contributions');
+const withdrawalsCollection = db.collection('withdrawals');
+const reportsCollection = db.collection('reports');
+const creditPurchasesCollection = db.collection('creditPurchases');
+const notificationsCollection = db.collection('notifications');
+
+// Connect and create indexes asynchronously
+async function connectDB() {
   try {
-    // Connect the client to the server
     await client.connect();
-    
-    // Database and Collections
-    const db = client.db('crowdfundly');
-    const usersCollection = db.collection('users');
-    const campaignsCollection = db.collection('campaigns');
-    const contributionsCollection = db.collection('contributions');
-    const withdrawalsCollection = db.collection('withdrawals');
-    const reportsCollection = db.collection('reports');
-    const creditPurchasesCollection = db.collection('creditPurchases');
-    const notificationsCollection = db.collection('notifications');
-
-
     await Promise.all([
       usersCollection.createIndex({ email: 1 }, { unique: true }),
       creditPurchasesCollection.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true }),
       contributionsCollection.createIndex({ campaignId: 1, supporterEmail: 1 }),
     ]);
+    console.log("Successfully connected to MongoDB and created indexes!");
+  } catch (error) {
+    console.error("MongoDB connection error:", error);
+  }
+}
+connectDB();
 
     // ==========================================
     // Middleware: Verify Token
@@ -1101,18 +1105,12 @@ async function run() {
     await client.db("admin").command({ ping: 1 });
     console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
-    // Start listening if not in Vercel serverless environment
-    if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
-      app.listen(port, () => {
-        console.log(`Server is running on port ${port}`);
-      });
-    }
-  } finally {
-    // Ensures that the client will close when you finish/error
-    // await client.close();
-  }
+// Start listening if not in Vercel serverless environment
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+  app.listen(port, () => {
+    console.log(`Server is running on port ${port}`);
+  });
 }
-run().catch(console.dir);
 
 // Export for Vercel Serverless
 module.exports = app;
