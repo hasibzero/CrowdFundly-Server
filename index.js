@@ -58,6 +58,7 @@ async function connectDB() {
       creditPurchasesCollection.createIndex({ stripeSessionId: 1 }, { unique: true, sparse: true }),
       contributionsCollection.createIndex({ campaignId: 1, supporterEmail: 1 }),
     ]);
+    await client.db("admin").command({ ping: 1 });
     console.log("Successfully connected to MongoDB and created indexes!");
   } catch (error) {
     console.error("MongoDB connection error:", error);
@@ -1102,8 +1103,7 @@ connectDB();
     });
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    // Ping is moved to connectDB
 
 // Start listening if not in Vercel serverless environment
 if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
