@@ -72,50 +72,52 @@ connectDB();
     // ==========================================
     const verifyToken = async (req, res, next) => {
 
-      // 1. Try Better Auth cookie via Next.js endpoint
+      // 1. Try Better Auth cookie via direct MongoDB lookup (bypass cross-origin fetch issues)
       if (req.headers.cookie && req.headers.cookie.includes('crowdfundly.session_token')) {
         try {
-          const cleanClientUrl = clientUrl.replace(/\/$/, '');
-          const response = await fetch(`${cleanClientUrl}/api/auth/get-session`, {
-            headers: { 
-              cookie: req.headers.cookie,
-              'Origin': cleanClientUrl,
-              'User-Agent': req.headers['user-agent'] || 'Node.js fetch'
+          const cookies = req.headers.cookie.split(';');
+          let sessionToken = null;
+          for (const cookie of cookies) {
+            const [name, ...rest] = cookie.trim().split('=');
+            if (name === 'crowdfundly.session_token' || name === '__Secure-crowdfundly.session_token') {
+              sessionToken = decodeURIComponent(rest.join('='));
+              break;
             }
-          });
-          if (response.ok) {
-            const sessionData = await response.json();
-            if (sessionData && sessionData.user) {
-              // Better-auth (e.g. Google) users live in better-auth's own `user`
-              // collection. Mirror them into our app `users` collection so the
-              // JWT-style endpoints (profile, credits, contributions, withdrawals,
-              // stats) can find them by email. New mirrors start at 0 credits (no bonus).
-              try {
-                await usersCollection.updateOne(
-                  { email: sessionData.user.email },
-                  {
-                    $setOnInsert: { credits: 0, createdAt: new Date() },
-                    $set: {
-                      name: sessionData.user.name || sessionData.user.email,
-                      photoURL: sessionData.user.image || '',
-                      role: sessionData.user.role || 'Supporter',
+          }
+
+          if (sessionToken) {
+            const dbSession = await client.db('crowdfundly').collection('session').findOne({ token: sessionToken });
+            if (dbSession && dbSession.expiresAt > new Date()) {
+              const baUser = await client.db('crowdfundly').collection('user').findOne({ _id: dbSession.userId });
+              if (baUser) {
+                try {
+                  await usersCollection.updateOne(
+                    { email: baUser.email },
+                    {
+                      $setOnInsert: { credits: 0, createdAt: new Date() },
+                      $set: {
+                        name: baUser.name || baUser.email,
+                        photoURL: baUser.image || '',
+                        role: baUser.role || 'Supporter',
+                      },
                     },
-                  },
-                  { upsert: true }
-                );
-              } catch (syncErr) {
-                console.error('Failed to mirror better-auth user into users collection:', syncErr);
+                    { upsert: true }
+                  );
+                } catch (syncErr) {
+                  console.error('Failed to mirror better-auth user:', syncErr);
+                }
+                
+                req.decoded = {
+                  email: baUser.email,
+                  role: baUser.role || 'Supporter',
+                  _id: baUser.id || baUser._id
+                };
+                return next();
               }
-              req.decoded = {
-                email: sessionData.user.email,
-                role: sessionData.user.role || 'Supporter',
-                _id: sessionData.user.id
-              };
-              return next();
             }
           }
         } catch (e) {
-          console.error("Better Auth token verification error:", e);
+          console.error("Better Auth direct token verification error:", e);
         }
       }
 
