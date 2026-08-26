@@ -1114,5 +1114,5 @@ async function run() {
 }
 run().catch(console.dir);
 
-// Export for Vercel Serverless
-module.exports = app;
+// // Export for Vercel Serverless
+// module.exports = app;
