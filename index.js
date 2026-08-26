@@ -128,7 +128,7 @@ connectDB();
       
       const token = req.headers.authorization.split(' ')[1];
       try {
-        const secret = new TextEncoder().encode(process.env.ACCESS_TOKEN_SECRET);
+        const secret = new TextEncoder().encode(process.env.ACCESS_TOKEN_SECRET || 'fallback_secret_must_match_backend');
         const { payload } = await jwtVerify(token, secret);
         req.decoded = payload;
         next();
