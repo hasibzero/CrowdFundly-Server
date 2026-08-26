@@ -11,7 +11,8 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 // Middleware
-const clientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
+const rawClientUrl = process.env.CLIENT_URL || 'http://localhost:3000';
+const clientUrl = rawClientUrl.replace(/\/$/, '');
 // Credit economy (per assessment spec):
 //   Purchase:   $1 => 10 credits    (supporters buy credits)
 //   Withdrawal: 20 credits => $1     (creators cash out earned credits)
