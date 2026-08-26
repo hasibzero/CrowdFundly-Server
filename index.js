@@ -74,9 +74,13 @@ connectDB();
       // 1. Try Better Auth cookie via Next.js endpoint
       if (req.headers.cookie && req.headers.cookie.includes('crowdfundly.session_token')) {
         try {
-          // Use global fetch (Node 18+)
-          const response = await fetch(`${clientUrl}/api/auth/get-session`, {
-            headers: { cookie: req.headers.cookie }
+          const cleanClientUrl = clientUrl.replace(/\/$/, '');
+          const response = await fetch(`${cleanClientUrl}/api/auth/get-session`, {
+            headers: { 
+              cookie: req.headers.cookie,
+              'Origin': cleanClientUrl,
+              'User-Agent': req.headers['user-agent'] || 'Node.js fetch'
+            }
           });
           if (response.ok) {
             const sessionData = await response.json();
