@@ -439,8 +439,8 @@ app.post('/api/campaigns', verifyToken, async (req, res) => {
 app.get('/api/campaigns', async (req, res) => {
   try {
     const { search, category, sort } = req.query;
-    // Only show approved campaigns whose deadline has not passed
-    let filter = { status: 'Approved', deadline: { $gt: new Date() } };
+    // Only show approved campaigns
+    let filter = { status: 'Approved' };
 
     if (search) {
       filter.$or = [
@@ -461,8 +461,16 @@ app.get('/api/campaigns', async (req, res) => {
       sortOption = { raised: -1 };
     }
 
-    const campaigns = await campaignsCollection.find(filter).sort(sortOption).toArray();
-    res.send(campaigns);
+    const rawCampaigns = await campaignsCollection.find(filter).sort(sortOption).toArray();
+    
+    const now = new Date();
+    // Filter out expired campaigns here to safely handle mixed data types (string/Date/undefined)
+    const activeCampaigns = rawCampaigns.filter(c => {
+      const dl = c.deadline ? new Date(c.deadline) : new Date(new Date(c.createdAt).getTime() + (c.duration || 30) * 86400000);
+      return dl > now;
+    });
+    
+    res.send(activeCampaigns);
   } catch (error) {
     res.status(500).send({ message: 'Failed to fetch campaigns', error: error.message });
   }
